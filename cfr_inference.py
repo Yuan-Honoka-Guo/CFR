@@ -113,66 +113,66 @@ def infer_CFR(args):
     image_preds, pixel_preds = [], []
     # ------------ [Testing Loop] ------------ #
 
-    # --- [Debug Init] 初始化统计容器 ---
+    # --- [Debug Init] Initialize statistics containers ---
     debug_stats = {
-        "min_dists": [],       # 暂存每个batch的最小距离
-        "max_dists": [],       # 暂存每个batch的最大距离
-        "total_features": 0,   # 总特征数 (像素点总数)
-        "replaced_count": 0    # 被替换的特征数 (距离 > theta)
+        "min_dists": [],       # Temporarily stores the minimum distances for each batch.
+        "max_dists": [],       # Temporarily stores the maximum distances for each batch.
+        "total_features": 0,   # Total number of features, equivalent to total pixels.
+        "replaced_count": 0    # Number of replaced features with distance > theta.
     }
     
-    theta = args.acceptance_threshold  # 距离阈值，超过该值的特征将被替换
+    theta = args.acceptance_threshold  # Distance threshold; features above it are replaced.
     # * Return (img, resized_organized_pc, resized_depth_map_3channel), gt[:1], label, rgb_path
     for (rgb, pc, depth), gt, label, rgb_path in tqdm(test_loader, desc = f'Extracting feature from class: {args.class_name}.'):
 
         rgb, pc, depth = rgb.to(device), pc.to(device), depth.to(device)
 
         with torch.no_grad():
-            # 1. 特征提取
+            # 1. Feature extraction.
             rgb_patch, xyz_patch = feature_extractor.get_features_maps(rgb, pc)
             
-            # 2. 跨模态映射 (CFR)
+            # 2. Crossmodal mapping (CFR).
             rgb_feat_pred = CFR_3Dto2D(xyz_patch)
             xyz_feat_pred = CFR_2Dto3D(rgb_patch)
 
             if memory_bank is not None:
-                # 3. 展平特征以便批量处理 (假设 batch_size=1, 但此写法兼容 batch>1)
+                # 3. Flatten features for batched processing. Assumes batch_size=1 but also supports batch_size>1.
                 # Flatten shape: (Total_Pixels, D)
                 flat_pred = rgb_feat_pred.reshape(-1, rgb_feat_pred.shape[-1])
                 flat_real = rgb_patch.reshape(-1, rgb_patch.shape[-1])
                 flat_xyz = xyz_patch.reshape(-1, xyz_patch.shape[-1])
                 xyz_mask_flat = (flat_xyz.sum(axis=-1) == 0)
                 
-                # 4. [Core] 批量计算距离 (向量化，极大提升速度)
+                # 4. [Core] Compute distances in batch with vectorization for speed.
                 # dists_pred: (Total_Pixels, 3)
                 dists_pred, _ = memory_bank.get_nearest_neighbors_consine(flat_pred, k=1)
                 
-                # 取最近邻距离 (第1列)
+                # Take nearest-neighbor distances from the first column.
                 min_dists = dists_pred[:, 0] # Shape: (Total_Pixels,)
 
-                # --- [Debug Logic] 统计信息收集 ---
+                # --- [Debug Logic] Statistics collection ---
                 # num_pixels = min_dists.shape[0]
                 
-                # A. 统计距离 > theta 的数量
+                # A. Count distances greater than theta.
                 mask_replace = min_dists >= theta
                 num_replace_batch = mask_replace.sum().item()
                 
                 # debug_stats["total_features"] += num_pixels
                 # debug_stats["replaced_count"] += num_replace_batch
 
-                # # B. 收集该 Batch 的 Top-50 极值 (转为 list 存入 CPU 以节省显存)
-                # k_log = min(50, num_pixels) # 防止像素数少于50报错
+                # # B. Collect the top-50 extremes for this batch as CPU lists to save GPU memory.
+                # k_log = min(50, num_pixels) # Avoid errors when fewer than 50 pixels are available.
                 
-                # # 收集最小的 50 个 (用于观察拟合得最好的特征)
+                # # Collect the 50 smallest values to inspect the best-matched features.
                 # batch_min_topk = torch.topk(min_dists, k_log, largest=False).values.cpu().tolist()
                 # debug_stats["min_dists"].extend(batch_min_topk)
                 
-                # # 收集最大的 50 个 (用于观察最异常/拟合最差的特征)
+                # # Collect the 50 largest values to inspect the most anomalous or worst-matched features.
                 # batch_max_topk = torch.topk(min_dists, k_log, largest=True).values.cpu().tolist()
                 # debug_stats["max_dists"].extend(batch_max_topk)
                 # # --------------------------------
 
-                # 5. 特征替换逻辑 (向量化)
+                # 5. Feature replacement logic, vectorized.
                 if num_replace_batch > 0:
                     valid_replace = mask_replace & (~xyz_mask_flat)
                     if valid_replace.sum() > 0:
@@ -186,16 +186,16 @@ def infer_CFR(args):
                             feats_replacement = attn_model.forward_topk(query, topk_keys, topk_values)
                             flat_pred[valid_replace] = feats_replacement
                         else:
-                            # 找出需要替换的真实特征
+                            # Select real features that need replacement.
                             feats_to_query = flat_real[valid_replace] # (M, D)
                             
-                            # 在 Memory Bank 检索真实特征的最近邻
+                            # Retrieve nearest neighbors of the real features from the memory bank.
                             _, feats_replacement = memory_bank.get_nearest_neighbors_consine(feats_to_query, k=1)
                             
-                            # 替换掉预测特征中不可靠的部分
+                            # Replace unreliable parts of the predicted features.
                             flat_pred[valid_replace] = feats_replacement.squeeze(1)
                     
-                    # 将修改后的 flat_pred 填回 rgb_feat_pred (reshape回去)
+                    # Reshape the updated flat predictions back into rgb_feat_pred.
                     rgb_feat_pred = flat_pred.reshape(rgb_feat_pred.shape)
 
 
@@ -300,12 +300,12 @@ def infer_CFR(args):
 
 
     # if not args.use_attention_retrieval:
-    #     # --- [Debug Report] 输出最终统计结果 ---
+    #     # --- [Debug Report] Print final statistics ---
     #     print("\n" + "="*40)
     #     print(f"DEBUG REPORT: Hyperparameter Analysis (Theta={theta})")
     #     print("="*40)
 
-    #     # 1. 计算替换比例
+    #     # 1. Calculate replacement ratio.
     #     total = debug_stats["total_features"]
     #     replaced = debug_stats["replaced_count"]
     #     ratio = (replaced / total) * 100 if total > 0 else 0
@@ -314,19 +314,19 @@ def infer_CFR(args):
     #     print(f"Features Replaced:      {replaced}")
     #     print(f"Replacement Ratio:      {ratio:.4f}%")
 
-    #     # 2. 距离极值统计
-    #     # 对所有 batch 收集到的极值再次排序，取全局 Top 50
+    #     # 2. Distance extreme-value statistics.
+    #     # Sort extremes collected from all batches again and keep the global top 50.
     #     all_mins = sorted(debug_stats["min_dists"])[:50]
     #     all_maxs = sorted(debug_stats["max_dists"], reverse=True)[:50]
 
     #     print("-" * 40)
     #     print("Top 10 Smallest Distances (Best Matched):")
-    #     print([f"{d:.4f}" for d in all_mins[:10]]) # 只打印前10个预览
+    #     print([f"{d:.4f}" for d in all_mins[:10]]) # Print only the first 10 values as a preview.
     #     print(f"Min (0th): {all_mins[0]:.6f} | 50th Min: {all_mins[-1]:.6f}")
 
     #     print("-" * 40)
     #     print("Top 10 Largest Distances (Most Anomalous / Worst Matched):")
-    #     print([f"{d:.4f}" for d in all_maxs[:10]]) # 只打印前10个预览
+    #     print([f"{d:.4f}" for d in all_maxs[:10]]) # Print only the first 10 values as a preview.
     #     print(f"Max (0th): {all_maxs[0]:.6f} | 50th Max: {all_maxs[-1]:.6f}")
     #     print("="*40 + "\n")
     # Calculate AD&S metrics.
